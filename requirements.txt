@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy>=2.0
+asyncpg
+python-dotenv
+pydantic
+httpx
+google-generativeai
+jsonschema
