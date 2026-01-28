@@ -16,12 +16,20 @@ HS_CODE_MAP = {
 # Category keywords -> which field to filter (for v_import_monthly_category)
 # We keep values short (e.g. "Тамхи") and expect builder.py to use ILIKE '%...%'
 CATEGORY_KEYWORDS: Dict[str, str] = {
-    "тамхи, суудлын автомашин": "sub3",
-    "хүнс, автобензин": "sub2",
-    "түргэн эдэлгээтэй": "sub1",  # ✅ FIX: was "ub1"
+    # sub3
+    "тамхи": "sub3",
+    "суудлын автомашин": "sub3",
+
+    # sub2
+    "хүнс": "sub2",
+    "автобензин": "sub2",
+
+    # sub1
+    "түргэн эдэлгээтэй": "sub1",
+
+    # purpose
     "хэрэглээний бүтээгдэхүүн": "purpose",
 }
-
 
 def _norm(s: str) -> str:
     return (s or "").strip().casefold()
