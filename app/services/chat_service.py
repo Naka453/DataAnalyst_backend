@@ -12,6 +12,7 @@ from app.conversation.suggest import build_suggestions
 
 # llm helpers
 from app.llm.followup_detector import detect_followup
+from app.llm.intent_extractor import sanitize_intent
 
 # intent extractor (dict intent буцаана)
 try:
@@ -66,6 +67,7 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
     if extract_intent is not None:
         try:
             intent_dict = extract_intent(q) or {}
+            intent_dict = sanitize_intent(intent_dict, q)
         except Exception:
             intent_dict = {}
     overrides: Dict[str, Any] = {}

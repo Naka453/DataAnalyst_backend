@@ -4,18 +4,13 @@ from .models import ConversationState
 
 def needs_clarification(s: ConversationState) -> Optional[Dict[str, Any]]:
     """
-    AI өөрөө асуулт асуух эсэхийг шийднэ
+    Зөвхөн үнэхээр ambiguity байвал л асууна
     """
-    if not s.metric:
-        return {
-            "question": "Ямар үзүүлэлтээр авах вэ?",
-            "choices": [
-                {"label": "Үнийн дүн", "prompt": "үнийн дүнгээр"},
-                {"label": "Тоо хэмжээ", "prompt": "тоо хэмжээгээр"},
-            ],
-        }
 
-    if not (s.time.year or s.time.years):
+    # ❌ metric clarify-г авна (backend өөрөө infer хийж чадна)
+
+    # ⏱ time clarify — зөвхөн explicit огноо, latest байхгүй үед
+    if not (s.time.year or s.time.years or getattr(s.time, "latest", False)):
         return {
             "question": "Аль оны мэдээлэл вэ?",
             "choices": [

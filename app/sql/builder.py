@@ -83,7 +83,7 @@ def _where_filters(filters: Dict[str, Any], params: Dict[str, Any], need_company
         hscodes = filters["hscode"]
         if isinstance(hscodes, list):
             params["hscodes"] = [str(x).strip() for x in hscodes]
-            clauses.append("hscode = ANY(:hscodes)")
+            clauses.append("hscode = ANY(CAST(:hscodes AS text[]))")
         else:
             params["hscode"] = str(hscodes).strip()
             clauses.append("hscode = :hscode")
@@ -139,13 +139,16 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
         window = 3
 
     # Server-side hscode fallback (LLM алдахад)
-    if not filters.get("hscode") and "нийт" not in _norm(question):
+    has_category = any(filters.get(k) for k in ("purpose", "sub1", "sub2", "sub3"))
+
+    # Server-side hscode fallback (LLM алдахад) — ✅ category үед хийхгүй
+    if (not has_category) and (not filters.get("hscode")) and ("нийт" not in _norm(question)):
         hs = _infer_hscode(question)
         if hs:
             filters["hscode"] = hs
 
     need_company = bool(filters.get("company")) and domain == "export"
-    view = resolve_view(domain, need_company, filters)
+    view, view_type = resolve_view(domain, need_company, filters)
 
     year, month, is_latest = _time_parts(intent.get("time", "latest"))
     years_list = _time_years(intent.get("time"))
@@ -166,6 +169,7 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
 
     meta = {
         "view": view,
+        "view_type": view_type,
         "domain": domain,
         "need_company": need_company,
         "calc": calc,                # 👈 аль хэдийн OK
@@ -223,6 +227,10 @@ latest_parts AS (
             params["year"] = year
             params["month"] = month
             time_clause = "year = :year AND month = :month"
+
+        if year is None:
+            # year өгөгдөөгүй бол latest гэж үзнэ
+            time_clause = "year = (SELECT y FROM latest_parts)"
         else:
             params["year"] = year
             time_clause = "year = :year"
@@ -396,30 +404,33 @@ ORDER BY year, month
         if is_latest:
             base = w.replace("WHERE ", "")
             extra = f" AND {base}" if base else ""
+
             sql_body = f"""
-cur AS (
-  SELECT {metric_expr} AS v
-  FROM {view}
-  WHERE year = (SELECT y FROM latest_parts)
-    AND month = (SELECT m FROM latest_parts){extra}
-),
-prev AS (
-  SELECT {metric_expr} AS v
-  FROM {view}
-  WHERE year = (SELECT y FROM latest_parts) - 1
-    AND month = (SELECT m FROM latest_parts){extra}
-)
-SELECT
-  (SELECT y FROM latest_parts) AS year,
-  (SELECT m FROM latest_parts) AS month,
-  (SELECT v FROM cur) AS current,
-  (SELECT v FROM prev) AS previous,
-  CASE
-    WHEN (SELECT v FROM prev) IS NULL OR (SELECT v FROM prev) = 0 THEN NULL
-    ELSE ((SELECT v FROM cur) - (SELECT v FROM prev)) / (SELECT v FROM prev) * 100.0
-  END AS pct
-"""
-            return text(_with_prefix(sql_body)), params, meta
+    cur AS (
+      SELECT {metric_expr} AS v
+      FROM {view}
+      WHERE year = (SELECT y FROM latest_parts)
+        AND month = (SELECT m FROM latest_parts){extra}
+    ),
+    prev AS (
+      SELECT {metric_expr} AS v
+      FROM {view}
+      WHERE year = (SELECT y FROM latest_parts) - 1
+        AND month = (SELECT m FROM latest_parts){extra}
+    )
+    SELECT
+      (SELECT y FROM latest_parts) AS year,
+      (SELECT m FROM latest_parts) AS month,
+      (SELECT v FROM cur) AS current,
+      (SELECT v FROM prev) AS previous,
+      CASE
+        WHEN (SELECT v FROM prev) IS NULL OR (SELECT v FROM prev) = 0 THEN NULL
+        ELSE ((SELECT v FROM cur) - (SELECT v FROM prev)) / (SELECT v FROM prev) * 100.0
+      END AS pct
+    """.strip()
+
+            # ✅ IMPORTANT: latest_cte + ",\n" + sql_body
+            return text("WITH " + latest_cte + ",\n" + sql_body), params, meta
 
         if year is None or month is None:
             if year is None:

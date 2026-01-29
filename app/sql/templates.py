@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Tuple
 
 
 # HS-level views
@@ -15,27 +16,31 @@ VIEW_IMPORT_CATEGORY = "public.v_import_monthly_category"
 def _need_category(filters: dict | None) -> bool:
     if not filters:
         return False
-    return any(
-        filters.get(k)
-        for k in ("purpose", "sub1", "sub2", "sub3")
-    )
+    return any(filters.get(k) for k in ("purpose", "sub1", "sub2", "sub3"))
 
 
-def resolve_view(domain: str, need_company: bool, filters: dict | None = None) -> str:
+def resolve_view(
+    domain: str,
+    need_company: bool,
+    filters: dict | None = None,
+) -> Tuple[str, str]:
+    """
+    Returns: (view_name, view_type)
+    view_type: "hs" | "category"
+    """
     need_category = _need_category(filters)
 
     if domain == "import":
-        # ангиллаар асууж байвал category view
         if need_category:
-            return VIEW_IMPORT_CATEGORY
-        return VIEW_IMPORT
+            return VIEW_IMPORT_CATEGORY, "category"
+        return VIEW_IMPORT, "hs"
 
     # export
     if need_company:
-        return VIEW_EXPORT_COMPANY
+        return VIEW_EXPORT_COMPANY, "hs"
 
-    # (ирээдүйд export category хэрэгтэй бол энд нэмнэ)
+    # Future hook:
     # if need_category:
-    #     return VIEW_EXPORT_CATEGORY
+    #     return VIEW_EXPORT_CATEGORY, "category"
 
-    return VIEW_EXPORT
+    return VIEW_EXPORT, "hs"

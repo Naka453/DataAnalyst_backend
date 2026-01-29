@@ -17,6 +17,7 @@ from app.models.intent import ChatRequest
 
 # ✅ conversation pre-processor (state merge + clarify + suggestions)
 from app.services.chat_service import handle_chat
+from app.analytics.query_log import log_query
 
 
 router = APIRouter()
@@ -34,6 +35,42 @@ def _unit(metric: str) -> str:
         return "тонн"
     return "ам.доллар/тонн"
 
+def _metric_label(metric: str) -> str:
+    if metric == "amountUSD":
+        return "үнийн дүн"
+    if metric == "quantity":
+        return "тоо хэмжээ"
+    return "нэгж үнэ"
+
+
+def _domain_label(domain: str) -> str:
+    return "импорт" if domain == "import" else "экспорт"
+
+
+def _filters_summary(intent: Dict[str, Any]) -> str:
+    filters = (intent or {}).get("filters") or {}
+    parts = []
+
+    # HS
+    hs = filters.get("hscode")
+    if isinstance(hs, list) and hs:
+        parts.append(f"HS {', '.join(map(str, hs[:6]))}" + ("…" if len(hs) > 6 else ""))
+    elif isinstance(hs, str) and hs:
+        parts.append(f"HS {hs}")
+
+    # category fields
+    for k, label in [("purpose", "purpose"), ("sub1", "sub1"), ("sub2", "sub2"), ("sub3", "sub3")]:
+        v = filters.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(f"{label}~{v.strip()}")
+
+    # country/senderReceiver/customs/company (optional)
+    for k in ("country", "senderReceiver", "customs", "company"):
+        v = filters.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(f"{k}~{v.strip()}")
+
+    return " • " + ", ".join(parts) if parts else ""
 
 def _scale_info(metric: str) -> dict:
     # Chart/Table дээр default scale
@@ -77,6 +114,37 @@ def _looks_analytic(q: str) -> bool:
     ]
     return any(k in t for k in keys) or any(ch.isdigit() for ch in t)
 
+def _infer_domain_from_text(q: str) -> Optional[str]:
+    t = (q or "").strip().casefold()
+    # хамгийн тод keyword-ууд
+    if "импорт" in t:
+        return "import"
+    if "экспорт" in t:
+        return "export"
+    return None
+
+
+def canonicalize_intent(intent: Dict[str, Any], state: Any, q: str) -> Dict[str, Any]:
+    """
+    ✅ intent/state/асуултын текст 3-аас хамгийн итгэлтэйг нь сонгож domain-оо тогтооно.
+    - Хэрвээ user асуултанд импорт/экспорт ил байвал тэр нь ялана.
+    - Үгүй бол state.domain
+    - Үгүй бол intent.domain
+    """
+    out = dict(intent or {})
+
+    q_domain = _infer_domain_from_text(q)
+    state_domain = getattr(state, "domain", None) if state is not None else None
+    intent_domain = out.get("domain")
+
+    domain = q_domain or state_domain or intent_domain or "export"
+    out["domain"] = domain
+
+    # metric fallback (optional)
+    if getattr(state, "metric", None) and not out.get("metric"):
+        out["metric"] = state.metric
+
+    return out
 
 def _infer_period(calc: str, time_field: Any) -> str:
     if calc in ("timeseries_month",):
@@ -104,74 +172,62 @@ def _normalize_value_result(
         }, None
 
     if calc == "timeseries_month":
-        return {
-            "series": [
+        series = []
+        for x in rows:
+            try:
+                yy = int(x.get("year")) if x.get("year") is not None else None
+            except Exception:
+                yy = None
+            try:
+                mm = int(x.get("month")) if x.get("month") is not None else None
+            except Exception:
+                mm = None
+
+            y_str = str(yy) if yy is not None else ""
+            m_str = f"{mm:02d}" if mm is not None else ""
+
+            series.append(
                 {
-                    "year": x.get("year"),
-                    "month": x.get("month"),
-                    "label": f"{x.get('year')}-{int(x.get('month') or 0):02d}",
+                    # ✅ string болгосон (front хүснэгтэнд 2024.00 болохгүй)
+                    "year": y_str,
+                    "month": m_str,
+                    "label": f"{y_str}-{m_str}" if y_str and m_str else (x.get("label") or ""),
                     "value": x.get("value"),
                 }
-                for x in rows
-            ]
-        }, None
+            )
+
+        return {"series": series}, None
 
     if calc == "timeseries_year":
-        return {
-            "series": [
+        series = []
+        for x in rows:
+            try:
+                yy = int(x.get("year")) if x.get("year") is not None else None
+            except Exception:
+                yy = None
+            y_str = str(yy) if yy is not None else ""
+
+            series.append(
                 {
-                    "year": x.get("year"),
-                    "label": str(x.get("year")),
+                    # ✅ string болгосон
+                    "year": y_str,
+                    "label": y_str or str(x.get("year") or ""),
                     "value": x.get("value"),
                 }
-                for x in rows
-            ]
-        }, None
+            )
+        return {"series": series}, None
 
     return {"value": r0.get("value")}, None
 
 
 def sync_intent_from_state(intent: dict, state: Any) -> dict:
     """
-    ✅ ConversationState -> builder.py-д таарах calc/time хэлбэр
-
-    builder.py:
-      - timeseries_month : time.year хэрэгтэй (эсвэл latest)
-      - timeseries_year  : time.years байвал олон мөр, time.year байвал 1 мөр
+    ✅ Single source of truth:
+    SQL intent always comes from ConversationState.to_intent()
     """
-    out = dict(intent or {})
-    out.setdefault("time", {})
-    if not isinstance(out["time"], dict):
-        out["time"] = {}
-
-    # 1) years байвал хамгийн түрүүнд timeseries_year болгоно
-    years = getattr(state.time, "years", None)
-    if years:
-        out["calc"] = "timeseries_year"
-        out["time"]["years"] = years
-        out["time"].pop("year", None)
-        out["time"].pop("month", None)
-        return out
-
-    # 2) granularity -> calc
-    gran = getattr(state.time, "granularity", None)
-
-    if gran == "month":
-        out["calc"] = "timeseries_month"
-        y = getattr(state.time, "year", None)
-        if y:
-            out["time"]["year"] = y
-        return out
-
-    if gran == "year":
-        out["calc"] = "timeseries_year"
-        y = getattr(state.time, "year", None)
-        if y:
-            out["time"]["year"] = y
-        return out
-
-    return out
-
+    if state and hasattr(state, "to_intent"):
+        return state.to_intent()
+    return intent or {}
 
 @router.get("/health")
 async def health():
@@ -198,32 +254,25 @@ async def chat(
     # ✅ 1) Conversation layer (state merge + clarify + suggestions)
     convo = handle_chat(q, session_id)
 
-    # If needs clarification, return directly (no SQL)
     if convo.get("mode") == "clarify":
-        # convo аль хэдийн meta/result structure-тэй
         return {
-            "answer": convo.get("answer", "Ойлгоход мэдээлэл дутуу байна."),
-            "meta": convo.get("meta", {}),
+            "answer": convo.get("answer"),
+            "meta": convo.get("meta"),
             "result": None,
         }
 
-    # ✅ Get merged state + intent
     state = convo.get("state")
-    intent: Dict[str, Any] = convo.get("intent") or {}
-    overrides: Dict[str, Any] = convo.get("overrides") or {}
+    overrides = convo.get("overrides") or {}
+    raw_intent = convo.get("intent") or {}  # debug only
 
-    # ✅ CRITICAL: sync calc/time for builder.py using merged state
-    intent = sync_intent_from_state(intent, state)
-
-    # Optional: ensure domain/metric fallback from state (state дээр заавал байхгүй байж болно)
-    if getattr(state, "domain", None) and not intent.get("domain"):
-        intent["domain"] = state.domain
-    if getattr(state, "metric", None) and not intent.get("metric"):
-        intent["metric"] = state.metric
+    # ✅ SINGLE SOURCE OF TRUTH
+    intent = state.to_intent() if state else {}
 
     calc = intent.get("calc") or "month_value"
     metric = intent.get("metric") or "amountUSD"
     domain = intent.get("domain") or "export"
+
+    sql, params, sql_meta = build_sql(intent, q)
 
     # 2) SQL + execute
     sql, params, sql_meta = build_sql(intent, q)
@@ -232,6 +281,25 @@ async def chat(
 
     # 3) Normalize
     normalized, err_code = _normalize_value_result(calc, rows)
+
+    # 2) SQL + execute
+    sql, params, sql_meta = build_sql(intent, q)
+    r = await db.execute(sql, params)
+    rows = [dict(x) for x in r.mappings().all()][:500]
+
+    # 3) Normalize
+    normalized, err_code = _normalize_value_result(calc, rows)
+
+    # ✅ LOG HERE (rows + err_code бэлэн болсон яг энэ цэг)
+    log_query({
+        "question": q,
+        "intent": intent,
+        "view": sql_meta.get("view"),
+        "view_type": sql_meta.get("view_type"),
+        "calc": sql_meta.get("calc"),
+        "row_count": len(rows),
+        "status": ("no_data" if err_code == "no_data" else "success"),
+    })
 
     unit = _unit(metric)
     period = _infer_period(calc, intent.get("time"))
@@ -259,6 +327,44 @@ async def chat(
         "period": period,
         **scale_meta,
     }
+
+    # ✅ If no data, return a clean answer + extra suggestions (LLM explanation skip)
+    if err_code == "no_data":
+        meta = convo.get("meta", {}) or {}
+        # нэмэлт UX suggestions
+        extra = [
+            {"label": "Хугацаагаа өөрчлөх", "prompt": "2024, 2025 оныг жилээр хүснэгтээр"},
+            {"label": "Сараар харах", "prompt": "2025 оны сар бүрээр хүснэгтээр"},
+            {"label": "Шүүлт сулруулах", "prompt": "HS код/ангилалгүйгээр нийт дүнг харуул"},
+        ]
+        # merge suggestions (хэрвээ meta.suggestions байхгүй бол)
+        existing = meta.get("suggestions") or []
+
+        # label+prompt-оор unique болгоно
+        seen = {(s.get("label"), s.get("prompt")) for s in existing}
+        for s in extra:
+            key = (s["label"], s["prompt"])
+            if key not in seen:
+                existing.append(s)
+                seen.add(key)
+
+        meta["suggestions"] = existing
+
+        meta.update(
+            {
+                "intent": intent,  # ✅ final intent used by SQL
+                "intent_raw": raw_intent,  # ✅ optional debug
+                "sql_meta": sql_meta,
+                "overrides": overrides,
+            }
+        )
+
+        return {
+            "answer": "Өгөгдөл олдсонгүй. Хугацаа/ангилал/шүүлтээ өөрчлөөд дахин оролдоорой.",
+            "meta": meta,
+            "result": result_contract,
+        }
+
     if err_code:
         result_contract["warning"] = err_code
 
@@ -294,53 +400,75 @@ async def chat(
         "rows_preview": rows[:20],
         "state": (state.model_dump() if hasattr(state, "model_dump") else None),
     }
+    domain_label = _domain_label(domain)
+    metric_label = _metric_label(metric)
+    filters_summary = _filters_summary(intent)
 
     explain_prompt = f"""
-Та экспорт/импортын monthly өгөгдөл тайлбарладаг Монгол хэлний туслах.
-Доорх JSON дээр үндэслэн 3–6 өгүүлбэрээр ойлгомжтой тайлбар бич.
-- Тоог таслалтайгаар бич
-- Он/сар, бүтээгдэхүүн (HS) байвал дурд
-- YoY бол өсөлт/бууралтыг тайлбарла
-- Хэт урт бүү болго
+    Та Монгол хэлээр хариулна. Доорх JSON-д байгаа тоо, огноо, шүүлтээс ӨӨР ЮМ БҮҮ ЗОХИО.
+    Зөвхөн JSON-д байгаа мэдээлэл дээр тулгуурлан 2–5 өгүүлбэрээр тайлбарла.
 
-JSON:
-{json.dumps(explain_payload, ensure_ascii=False, default=str)}
-""".strip()
+    Шаардлага:
+    - domain: "{domain_label}" гэдгийг ашигла
+    - metric: "{metric_label}" гэдгийг ашигла
+    - Хэрвээ result.warning == "no_data" бол: "Өгөгдөл олдсонгүй" гэж нэг өгүүлбэр бичээд зогс.
+    - timeseries (series) бол: "Хүснэгт/цуваа гаргалаа" + хамгийн эхний ба сүүлийн утгыг л дурд (байвал)
+    - single value бол: display-г нэг өгүүлбэрт тодорхой хэл
+    - Шүүлтүүд байвал нэг мөрөөр {filters_summary} байдлаар дурд
+    - Тоог таслалтай, 2 орны нарийвчлалтай бич (display байгаа бол display-г тэр чигт нь ашигла)
+
+    JSON:
+    {json.dumps(explain_payload, ensure_ascii=False, default=str)}
+    """.strip()
 
     explanation = llm_text(explain_prompt).strip()
 
     # fallback base answer
     if not explanation:
-        if calc == "yoy":
+        flt = _filters_summary(intent)
+        dom = _domain_label(domain)
+        met = _metric_label(metric)
+
+        if err_code == "no_data":
+            explanation = "Өгөгдөл олдсонгүй. Хугацаа/ангилал/шүүлтээ өөрчлөөд дахин оролдоорой."
+        elif calc == "yoy":
             pct = normalized.get("pct")
             trend = "—"
             if pct is not None:
                 trend = "өссөн" if pct > 0 else ("буурсан" if pct < 0 else "өөрчлөлтгүй")
             explanation = (
-                f"{domain} • өмнөх оны мөн үе: "
-                f"Одоогийн={display['current']}, "
-                f"Өмнөх={display['previous']}, "
+                f"{dom} • {met}{flt}: "
+                f"Одоогийн={display['current']}, Өмнөх={display['previous']}, "
                 f"Өөрчлөлт={display['pct']} ({trend})"
             )
-        elif calc == "timeseries_month":
-            explanation = f"{domain} • {metric} • сар сараар цуваа гаргалаа."
-        elif calc == "timeseries_year":
-            explanation = f"{domain} • {metric} • жил жилээр хүснэгт/цуваа гаргалаа."
+        elif calc in ("timeseries_month", "timeseries_year"):
+            series = normalized.get("series") or []
+            if series:
+                first = series[0]
+                last = series[-1]
+                # display байхгүй үед raw value дээр scale ашиглан format хийхгүй, богино үлдээнэ
+                explanation = (
+                    f"{dom} • {met}{flt}: хүснэгт/цуваа гаргалаа. "
+                    f"Эхлэл {first.get('label')}: {first.get('value_scaled')}, "
+                    f"Сүүл {last.get('label')}: {last.get('value_scaled')}."
+                )
+            else:
+                explanation = f"{dom} • {met}{flt}: хүснэгт/цуваа гаргалаа."
         else:
-            explanation = f"{domain} • {calc} • {metric} = {display}"
+            explanation = f"{dom} • {met}{flt}: {display}"
 
     # suggestions/state meta from convo
     meta = convo.get("meta", {}) or {}
-    meta.update(
-        {
-            "intent": intent,
-            "sql_meta": sql_meta,
-            "overrides": overrides,
-        }
-    )
+    meta.update({
+        "intent": intent,  # ✅ FINAL SQL INTENT
+        "intent_raw": raw_intent,  # debug
+        "sql_meta": sql_meta,
+        "overrides": overrides,
+    })
 
     return {
         "answer": explanation,
         "meta": meta,
         "result": result_contract,
     }
+
