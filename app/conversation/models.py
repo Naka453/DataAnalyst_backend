@@ -16,6 +16,9 @@ class TimeSpec(BaseModel):
     granularity: Optional[str] = None  # "month" | "year"
     latest: bool = False  # ✅ add (байхгүй бол нэм)
 
+    # "country" буюу "улсаар" гэсэн асуултаар хамаарах шийдвэр
+    country: Optional[str] = None  # Улсаар шүүхийн тулд нэмэгдсэн
+
     @model_validator(mode="after")
     def _normalize_time(self) -> "TimeSpec":
         # years өгөгдвөл year-г цэвэрлэнэ
@@ -92,6 +95,9 @@ class ConversationState(BaseModel):
         # -------- filters --------
         if self.commodity and self.commodity.hscode:
             intent["filters"]["hscode"] = self.commodity.hscode
+
+        if self.commodity and self.commodity.label:
+            intent["filters"]["sub3"] = self.commodity.label  # "суудлын автомашин"
 
         # -------- calc from granularity --------
         if self.time.granularity == "month":

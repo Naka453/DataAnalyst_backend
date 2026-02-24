@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 import re
 from typing import Any, Dict, Tuple, Optional, List
-
 from sqlalchemy import text
 from app.sql.templates import resolve_view
 
@@ -27,9 +25,55 @@ def _infer_category_filters(question: str) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for kw, field in CATEGORY_KEYWORDS.items():
         if kw in qn:
-            out[field] = kw
+            out[field] = kw  # Хэрэглэгчийн асуултанд байгаа үгийг `CATEGORY_KEYWORDS` харгалзуулах
     return out
 
+
+def _infer_company_name(question: str) -> Optional[str]:
+    qn = _norm(question)
+
+    # Эрдэнэс Таван толгой
+    if "эрдэнэс таван толгой" in qn:
+        return "Эрдэнэс Таван толгой ХК"
+
+    # Эрдэнэт үйлдвэр ТӨҮГ Төрийн байгууллага
+    if "эрдэнэт үйлдвэр" in qn or "төрийн байгууллага" in qn:
+        return "Эрдэнэт үйлдвэр ТӨҮГ Төрийн байгууллага"
+
+    if "энержиресурс" in qn:
+        return "Энержиресурс ХХК"
+
+    if "монголын алт МАК" in qn:
+        return "Монголын алт МАК ХХК"
+
+    if "оюутолгой" in qn:
+        return "Оюутолгой ХХК /ГХО/"
+
+    if "болдтөмөр ерөө гол" in qn:
+        return "Болдтөмөр ерөө гол ХХК /ГХО/"
+
+    if "петрочайна дачин тамсаг" in qn:
+        return "Петрочайна дачин тамсаг ХХК /ГХО/"
+
+    if "доншен газрын тос монгол" in qn:
+        return "Доншен газрын тос монгол ХХК"
+
+    if "дарханы төмөрлөгийн үйлдвэр" in qn:
+        return "Дарханы төмөрлөгийн үйлдвэр ХХК"
+
+    if "алтайнхүдэр" in qn:
+        return "Алтайнхүдэр ХХК /ГХО/"
+
+    if "монголросцветмет" in qn or "эрдэнэс критикал минералс" in qn :
+        return "Монголросцветмет  ТӨХК"
+
+    if "тавантолгой" in qn:
+        return "Тавантолгой ХК"
+
+    if "өсөхзоос" in qn:
+        return "Өсөхзоос ХХК"
+
+    return None
 
 def _norm(s: Any) -> str:
     return str(s).strip().casefold()
@@ -57,7 +101,6 @@ def _infer_hscode(question: str) -> Optional[List[str]]:
         if k in qn:
             return v
     return None
-
 
 def _time_parts(intent_time: Any) -> Tuple[Optional[int], Optional[int], bool]:
     """
@@ -135,12 +178,111 @@ def _where_filters(filters: Dict[str, Any], params: Dict[str, Any], need_company
         params["sub3"] = f"%{str(filters['sub3']).strip()}%"
         clauses.append("sub3 ILIKE :sub3")
 
-    # export company view only
-    if need_company and filters.get("company"):
-        params["company"] = f"%{str(filters['company']).strip()}%"
-        clauses.append("(companyName ILIKE :company OR companyRegnum ILIKE :company)")
+        # Хэрэв компанийн нэр орсон бол WHERE нөхцөлд оруулах
+    if filters.get("company"):
+        params["company"] = f"%{filters['company']}%"  # Компаний нэрийг params-д оруулна
+        clauses.append('"companyName" ILIKE :company')  # Шүүлтэрийг зөв бичиж оруулна
 
     return ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+def build_sql_for_import_by_country(intent: Dict[str, Any], question: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    domain = intent.get("domain", "import")
+    metric = intent.get("metric", "amountUSD")
+    year = intent.get("time", {}).get("year", 2025)
+    filters = intent.get("filters", {})
+    topn = int(intent.get("topn", 50))
+
+    # Шаардлагатай тохиолдолд "импорт улсаар" гэдэг түлхүүр үгнээс calc-ийг тодорхойлох
+    if "импорт улсаар" in question:
+        calc = "timeseries_country"  # calc-ийг "timeseries_country" болгоно
+    else:
+        calc = intent.get("calc", "timeseries_month")  # Default calc to "timeseries_month"
+
+    params = {"year": year, "topn": topn}
+
+    # Асуултанд байгаа category filter-ийг шалгах
+    cat_filters = _infer_category_filters(question)
+    if cat_filters:
+        filters.update(cat_filters)  # `sub3` гэх мэт шүүлтүүрүүдийг нэмэх
+        filters.pop("hscode", None)  # Хэрэв HS код орсон бол устгах
+
+    where_clauses = []
+    if filters.get("sub3"):
+        where_clauses.append(f"sub3 ILIKE :sub3")
+        params["sub3"] = f"%{filters['sub3']}%"  # "суудлын автомашин" буюу `sub3` шүүлтүүрийг оруулж өгөх
+
+    # Хэрэв "timeseries_country" байгаа бол, улсаар шүүлт хийх
+    if calc == "timeseries_country":
+        where_clauses.append(f"senderReceiver IS NOT NULL")
+
+    where_clause = " AND ".join(where_clauses)
+
+    # SQL query
+    sql_query = f"""
+        SELECT
+          "senderReceiver" AS country,
+          SUM(COALESCE({metric}, 0)) AS value
+        FROM public.v_import_monthly_hs
+        WHERE year = :year
+        {f'AND sub3 ILIKE :sub3' if filters.get("sub3") else ''}  -- Шүүлтүүр нэмэх
+        GROUP BY "senderReceiver"
+        ORDER BY value DESC
+        LIMIT :topn;
+        """
+
+    meta = {
+        "view": "public.v_import_monthly_hs",
+        "view_type": "hs",
+        "domain": domain,
+        "metric": metric,
+        "topn": topn
+    }
+
+    return sql_query, params, meta
+
+def update_meta_for_country_granularity(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    API хариуны метад `granularity` параметрийг улсаар авах тохиргоог хийх
+    """
+    # granularity-г "country"-д тохируулж, улсаар мэдээлэл авах
+    meta["granularity"] = "country"
+
+    return meta
+
+def adjust_filters_for_country(question: str) -> Dict[str, Any]:
+    """
+    Асуулгын дагуу шүүлтүүрийг зөв тодорхойлох
+    """
+    filters = {}
+
+    # "суудлын автомашин" гэж байгаа эсэхийг шалгах
+    if "суудлын автомашин" in question:
+        filters["sub3"] = "суудлын автомашин"
+
+    return filters
+
+def build_response_for_country(sql_result: List[Dict[str, Any]], meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    API хариуг үүсгэх, улс орон тус бүрийн үнийн дүнг гаргах
+    """
+    result = []
+    for row in sql_result:
+        result.append({
+            "country": row["country"],
+            "value": row["value"],
+            "display": f"{row['value'] / 1000000:.2f} сая ам.доллар",
+            "unit": "ам.доллар",
+            "period": "year",
+            "scale": 1000000,
+            "scale_label": "сая",
+            "value_scaled": row["value"] / 1000000
+        })
+
+    return {
+        "answer": "2025 оны суудлын автомашины импорт улсаар.",
+        "meta": meta,
+        "result": result
+    }
 
 
 def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
@@ -158,7 +300,34 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
     if window <= 0:
         window = 3
 
+    sql_query, params, meta = build_sql_for_import_by_country(intent, question)
+
     qn = _norm(question)
+    company_name = _infer_company_name(question)
+    if company_name:
+        filters["company"] = company_name
+    need_company = "компаний" in qn
+
+    if "импорт" in qn:
+        domain = "import"
+
+    # `calc` параметрийг year_total болгох
+    if "импортын үнийн дүн" in qn:  # Импортын үнийн дүн асуусан бол "year_total"-г ашиглана
+            calc = "year_total"
+
+    # params: хувиргасан шүүлтүүрүүд
+    params: Dict[str, Any] = {"topn": topn, "window": window, "year": filters.get("year", 2025)}
+
+    # Шүүлтэрт компани нэрийг оруулах (company field-ийн шүүлтүүр)
+    if filters.get("company"):
+        params["company"] = f"%{filters['company']}%"  # Компаний нэрийг params-д оруулна
+
+    if domain == "import":
+        view = "public.v_import_monthly_hs"  # Импортын мэдээлэл авах view
+        view_type = "hs"
+    else:
+        view = "public.v_export_monthly_hs"  # Экспортын мэдээлэл авах view
+        view_type = "hs"
 
     # -------------------------------------------------
     # ✅ 1) Category fallback (always wins; never mix HS)
@@ -208,7 +377,6 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
     # -------------------------------------------------
     # ✅ 6) Params + where
     # -------------------------------------------------
-    params: Dict[str, Any] = {"topn": topn, "window": window}
     w = _where_filters(filters, params, need_company)
 
     # metric expr (aggregate level)
@@ -232,9 +400,10 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
         "window": window,
         "is_timeseries": calc.startswith("timeseries"),
         "granularity": (
-            "year" if calc == "timeseries_year"
+            "country" if calc == "timeseries_country"  # "timeseries_country" тохиолдолд granularity-г "country" гэж тохируулах
+            else "year" if calc == "timeseries_year"
             else "month" if calc == "timeseries_month"
-            else "single"
+            else "single"  # default for other calc types
         ),
     }
 
@@ -343,18 +512,19 @@ latest_parts AS (
     """
             return text(sql_body), params, meta
 
+    # calc == "year_total" тохиолдолд (2025 оны импортын нийт үнийн дүнг гаргах)
     if calc == "year_total":
         if is_latest:
             base = w.replace("WHERE ", "")
             extra = f" AND {base}" if base else ""
             sql_body = f"""
-SELECT
-  (SELECT y FROM latest_parts) AS year,
-  NULL::int AS month,
-  {metric_expr} AS value
-FROM {view}
-WHERE year = (SELECT y FROM latest_parts){extra}
-"""
+    SELECT
+      (SELECT y FROM latest_parts) AS year,
+      NULL::int AS month,
+      {metric_expr} AS value
+    FROM {view}
+    WHERE year = (SELECT y FROM latest_parts){extra}
+    """
             return text(_with_prefix(sql_body)), params, meta
 
         if year is None:
@@ -362,29 +532,14 @@ WHERE year = (SELECT y FROM latest_parts){extra}
         params["year"] = year
         base_where = w + (" AND year = :year" if w else "WHERE year = :year")
         sql_body = f"""
-SELECT
-  CAST(:year AS int) AS year,
-  NULL::int AS month,
-  {metric_expr} AS value
-FROM {view}
-{base_where}
-"""
+    SELECT
+      CAST(:year AS int) AS year,
+      NULL::int AS month,
+      {metric_expr} AS value
+    FROM {view}
+    {base_where}
+    """
         return text(sql_body), params, meta
-
-    if calc == "ytd":
-        if is_latest:
-            base = w.replace("WHERE ", "")
-            extra = f" AND {base}" if base else ""
-            sql_body = f"""
-SELECT
-  (SELECT y FROM latest_parts) AS year,
-  (SELECT m FROM latest_parts) AS month,
-  {metric_expr} AS value
-FROM {view}
-WHERE year = (SELECT y FROM latest_parts)
-  AND month <= (SELECT m FROM latest_parts){extra}
-"""
-            return text(_with_prefix(sql_body)), params, meta
 
         if year is None:
             year = 0
@@ -474,6 +629,31 @@ ORDER BY year, month
     ORDER BY 1
     """
         return text(sql_body), params, meta
+
+    if calc == "timeseries_country":
+        sql_query = f"""
+            SELECT
+              "senderReceiver" AS country,
+              SUM(COALESCE({metric}, 0)) AS value
+            FROM public.v_import_monthly_hs
+            WHERE year = :year
+            {f'AND sub3 ILIKE :sub3' if filters.get("sub3") else ''}
+            GROUP BY "senderReceiver"
+            ORDER BY value DESC
+            LIMIT :topn;
+            """
+
+        meta = {
+            "view": "public.v_import_monthly_hs",
+            "view_type": "hs",
+            "domain": domain,
+            "metric": metric,
+            "topn": topn
+        }
+
+        return text(sql_query), params, meta
+
+
 
     if calc == "yoy":
         if is_latest:

@@ -125,14 +125,14 @@ def _infer_domain_from_text(q: str) -> Optional[str]:
 
 
 def canonicalize_intent(intent: Dict[str, Any], state: Any, q: str) -> Dict[str, Any]:
-    """
-    ✅ intent/state/асуултын текст 3-аас хамгийн итгэлтэйг нь сонгож domain-оо тогтооно.
-    - Хэрвээ user асуултанд импорт/экспорт ил байвал тэр нь ялана.
-    - Үгүй бол state.domain
-    - Үгүй бол intent.domain
-    """
     out = dict(intent or {})
 
+    # Импорт улсаар байх үгсийг олж `calc`-ийг тохируулна
+    if "импорт улсаар" in q:
+        out["calc"] = "timeseries_country"  # Улсаар тооцоолол хийх
+        out["filters"] = {"sub3": "суудлын автомашин"}  # Суудлын автомашины импорт
+
+    # domain тодорхойлох хэсэг
     q_domain = _infer_domain_from_text(q)
     state_domain = getattr(state, "domain", None) if state is not None else None
     intent_domain = out.get("domain")
@@ -140,7 +140,7 @@ def canonicalize_intent(intent: Dict[str, Any], state: Any, q: str) -> Dict[str,
     domain = q_domain or state_domain or intent_domain or "export"
     out["domain"] = domain
 
-    # metric fallback (optional)
+    # metric fallback
     if getattr(state, "metric", None) and not out.get("metric"):
         out["metric"] = state.metric
 

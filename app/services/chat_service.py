@@ -26,14 +26,6 @@ store = InMemorySessionStore()
 
 
 def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
-    """
-    Conversation layer only:
-    - session_id -> state load/store
-    - intent + follow-up overrides -> merge state
-    - clarification decision
-    - suggestions
-    Энэ функц SQL ажиллуулахгүй.
-    """
     sid = (session_id or "default").strip() or "default"
     q_raw = (message or "").strip()
 
@@ -65,13 +57,11 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
     awaiting = bool(getattr(prev, "awaiting_clarification", False))
     pending_q = getattr(prev, "pending_question", None)
 
-    # If we are awaiting clarification, treat this message as answer
     if awaiting and pending_q:
         q_final = f"{pending_q} {q_raw}".strip()
     else:
         q_final = q_raw
 
-    # ✅ prev intent snapshot (for fallback context)
     prev_intent: Dict[str, Any] = {}
     try:
         prev_intent = prev.to_intent() if prev and hasattr(prev, "to_intent") else {}
@@ -84,12 +74,15 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
         try:
             intent_dict = extract_intent(q_final) or {}
             intent_dict = sanitize_intent(intent_dict, q_final)
+
+            # Шинэ intent-ийг тодорхойлох (импорт улсаар байвал)
+            if "импорт улсаар" in q_final:
+                intent_dict["calc"] = "timeseries_country"  # Улсаар тооцоолол хийх
+                intent_dict["filters"] = {"sub3": "суудлын автомашин"}  # Суудлын автомашины импорт
         except Exception:
-            # ✅ LLM extractor failed -> fallback with prev_state
             intent_dict = build_intent_fallback(q_final, prev_state=prev_intent)
             intent_dict = sanitize_intent(intent_dict, q_final)
     else:
-        # ✅ extractor not available -> always fallback with prev_state
         intent_dict = build_intent_fallback(q_final, prev_state=prev_intent)
         intent_dict = sanitize_intent(intent_dict, q_final)
 
@@ -122,10 +115,7 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
     # 7) clarification?
     clar = needs_clarification(state)
     if clar:
-        # ✅ Enter clarify mode: store what question we’re clarifying for
-        # If we were already clarifying, keep the original pending question
         base_q = pending_q if awaiting and pending_q else q_raw
-
         state.awaiting_clarification = True
         state.pending_question = base_q
         state.pending_clarify = clar
@@ -141,7 +131,6 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
                 "state": state.model_dump(),
                 "intent": intent_dict,
                 "overrides": overrides,
-                # ✅ debug helpers (remove later if you want)
                 "pending_question": base_q,
                 "q_final": q_final,
             },
@@ -162,7 +151,6 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
             "state": state.model_dump(),
             "intent": intent_dict,
             "overrides": overrides,
-            # ✅ debug helpers
             "q_final": q_final,
         },
         "result": None,

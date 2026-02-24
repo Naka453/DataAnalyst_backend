@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
 
+
 # ✅ Truststore: optional (dev/VPN дээр хэрэгтэй байж болно), production дээр байхгүй байсан ч асна
 try:
     import truststore
@@ -13,6 +14,7 @@ except Exception:
     pass
 
 app = FastAPI(title="Trade Chatbot API", version="0.1.0")
+
 
 origins = [
     "http://localhost:3000",

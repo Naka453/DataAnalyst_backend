@@ -16,6 +16,7 @@ class Calc(str, Enum):
     ytd = "ytd"                            # он эхнээс (sum)
     yoy = "yoy"                            # өмнөх оны мөн үе (month vs prev year same month)
     timeseries_month = "timeseries_month"  # жил дотор сар сараар (series)
+    timeseries_country = "timeseries_country"
     year_total = "year_total"              # тухайн жилийн нийлбэр
     avg_months = "avg_months"              # сүүлийн N сарын дундаж (month_value-ийн average)
     avg_years = "avg_years"                # сүүлийн N жилийн дундаж (year_total-ийн average)
