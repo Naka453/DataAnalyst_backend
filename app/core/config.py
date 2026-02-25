@@ -1,6 +1,8 @@
 from __future__ import annotations
+
 import os
 from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,13 +13,19 @@ class Settings:
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
     timezone: str = os.getenv("TIMEZONE", "Asia/Ulaanbaatar").strip()
-    api_key: str = os.getenv("API_KEY", "dev-key-123").strip()
+    api_key: str = os.getenv("API_KEY", "").strip()
 
     def validate(self) -> None:
+        missing: list[str] = []
         if not self.database_url:
-            raise RuntimeError("DATABASE_URL missing in environment")
+            missing.append("DATABASE_URL")
         if not self.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY missing in environment")
+            missing.append("GEMINI_API_KEY")
+        if not self.api_key:
+            missing.append("API_KEY")
+
+        if missing:
+            raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
 
 settings = Settings()
-settings.validate()

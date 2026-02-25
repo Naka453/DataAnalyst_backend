@@ -19,6 +19,7 @@ CATEGORY_KEYWORDS: Dict[str, str] = {
     # sub3
     "тамхи": "sub3",
     "суудлын автомашин": "sub3",
+    "суудлын автомашины": "sub3",
 
     # sub2
     "хүнс": "sub2",

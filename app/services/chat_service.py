@@ -75,10 +75,9 @@ def handle_chat(message: str, session_id: str) -> Dict[str, Any]:
             intent_dict = extract_intent(q_final) or {}
             intent_dict = sanitize_intent(intent_dict, q_final)
 
-            # Шинэ intent-ийг тодорхойлох (импорт улсаар байвал)
-            if "импорт улсаар" in q_final:
-                intent_dict["calc"] = "timeseries_country"  # Улсаар тооцоолол хийх
-                intent_dict["filters"] = {"sub3": "суудлын автомашин"}  # Суудлын автомашины импорт
+            # Улсаар харуулах intent override (импорт + улсаар)
+            if "импорт" in q_final and "улсаар" in q_final:
+                intent_dict["calc"] = "timeseries_country"
         except Exception:
             intent_dict = build_intent_fallback(q_final, prev_state=prev_intent)
             intent_dict = sanitize_intent(intent_dict, q_final)

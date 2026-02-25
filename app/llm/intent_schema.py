@@ -25,7 +25,7 @@ INTENT_SCHEMA = {
                 "ytd",
                 "timeseries_month",
                 "timeseries_year",
-                "timeseries_country"# ✅ NEW
+                "timeseries_country",# ✅ NEW
                 "yoy",
                 "avg_months",
                 "avg_years",

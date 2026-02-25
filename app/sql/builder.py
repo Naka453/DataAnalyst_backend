@@ -14,6 +14,7 @@ HS_CODE_MAP = {
 CATEGORY_KEYWORDS: Dict[str, str] = {
     "тамхи": "sub3",
     "суудлын автомашин": "sub3",
+    "суудлын автомашины": "sub3",
     "хүнс": "sub2",
     "автобензин": "sub2",
     "түргэн эдэлгээтэй": "sub1",
@@ -184,107 +185,6 @@ def _where_filters(filters: Dict[str, Any], params: Dict[str, Any], need_company
         clauses.append('"companyName" ILIKE :company')  # Шүүлтэрийг зөв бичиж оруулна
 
     return ("WHERE " + " AND ".join(clauses)) if clauses else ""
-
-def build_sql_for_import_by_country(intent: Dict[str, Any], question: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    domain = intent.get("domain", "import")
-    metric = intent.get("metric", "amountUSD")
-    year = intent.get("time", {}).get("year", 2025)
-    filters = intent.get("filters", {})
-    topn = int(intent.get("topn", 50))
-
-    # Шаардлагатай тохиолдолд "импорт улсаар" гэдэг түлхүүр үгнээс calc-ийг тодорхойлох
-    if "импорт улсаар" in question:
-        calc = "timeseries_country"  # calc-ийг "timeseries_country" болгоно
-    else:
-        calc = intent.get("calc", "timeseries_month")  # Default calc to "timeseries_month"
-
-    params = {"year": year, "topn": topn}
-
-    # Асуултанд байгаа category filter-ийг шалгах
-    cat_filters = _infer_category_filters(question)
-    if cat_filters:
-        filters.update(cat_filters)  # `sub3` гэх мэт шүүлтүүрүүдийг нэмэх
-        filters.pop("hscode", None)  # Хэрэв HS код орсон бол устгах
-
-    where_clauses = []
-    if filters.get("sub3"):
-        where_clauses.append(f"sub3 ILIKE :sub3")
-        params["sub3"] = f"%{filters['sub3']}%"  # "суудлын автомашин" буюу `sub3` шүүлтүүрийг оруулж өгөх
-
-    # Хэрэв "timeseries_country" байгаа бол, улсаар шүүлт хийх
-    if calc == "timeseries_country":
-        where_clauses.append(f"senderReceiver IS NOT NULL")
-
-    where_clause = " AND ".join(where_clauses)
-
-    # SQL query
-    sql_query = f"""
-        SELECT
-          "senderReceiver" AS country,
-          SUM(COALESCE({metric}, 0)) AS value
-        FROM public.v_import_monthly_hs
-        WHERE year = :year
-        {f'AND sub3 ILIKE :sub3' if filters.get("sub3") else ''}  -- Шүүлтүүр нэмэх
-        GROUP BY "senderReceiver"
-        ORDER BY value DESC
-        LIMIT :topn;
-        """
-
-    meta = {
-        "view": "public.v_import_monthly_hs",
-        "view_type": "hs",
-        "domain": domain,
-        "metric": metric,
-        "topn": topn
-    }
-
-    return sql_query, params, meta
-
-def update_meta_for_country_granularity(meta: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    API хариуны метад `granularity` параметрийг улсаар авах тохиргоог хийх
-    """
-    # granularity-г "country"-д тохируулж, улсаар мэдээлэл авах
-    meta["granularity"] = "country"
-
-    return meta
-
-def adjust_filters_for_country(question: str) -> Dict[str, Any]:
-    """
-    Асуулгын дагуу шүүлтүүрийг зөв тодорхойлох
-    """
-    filters = {}
-
-    # "суудлын автомашин" гэж байгаа эсэхийг шалгах
-    if "суудлын автомашин" in question:
-        filters["sub3"] = "суудлын автомашин"
-
-    return filters
-
-def build_response_for_country(sql_result: List[Dict[str, Any]], meta: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    API хариуг үүсгэх, улс орон тус бүрийн үнийн дүнг гаргах
-    """
-    result = []
-    for row in sql_result:
-        result.append({
-            "country": row["country"],
-            "value": row["value"],
-            "display": f"{row['value'] / 1000000:.2f} сая ам.доллар",
-            "unit": "ам.доллар",
-            "period": "year",
-            "scale": 1000000,
-            "scale_label": "сая",
-            "value_scaled": row["value"] / 1000000
-        })
-
-    return {
-        "answer": "2025 оны суудлын автомашины импорт улсаар.",
-        "meta": meta,
-        "result": result
-    }
-
-
 def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any], Dict[str, Any]]:
     domain = intent.get("domain", "export")
     calc = intent.get("calc", "month_value")
@@ -300,13 +200,10 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
     if window <= 0:
         window = 3
 
-    sql_query, params, meta = build_sql_for_import_by_country(intent, question)
-
     qn = _norm(question)
     company_name = _infer_company_name(question)
     if company_name:
         filters["company"] = company_name
-    need_company = "компаний" in qn
 
     if "импорт" in qn:
         domain = "import"
@@ -316,7 +213,7 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
             calc = "year_total"
 
     # params: хувиргасан шүүлтүүрүүд
-    params: Dict[str, Any] = {"topn": topn, "window": window, "year": filters.get("year", 2025)}
+    params: Dict[str, Any] = {"topn": topn, "window": window}
 
     # Шүүлтэрт компани нэрийг оруулах (company field-ийн шүүлтүүр)
     if filters.get("company"):
@@ -631,27 +528,30 @@ ORDER BY year, month
         return text(sql_body), params, meta
 
     if calc == "timeseries_country":
-        sql_query = f"""
-            SELECT
-              "senderReceiver" AS country,
-              SUM(COALESCE({metric}, 0)) AS value
-            FROM public.v_import_monthly_hs
-            WHERE year = :year
-            {f'AND sub3 ILIKE :sub3' if filters.get("sub3") else ''}
-            GROUP BY "senderReceiver"
-            ORDER BY value DESC
-            LIMIT :topn;
-            """
+        if is_latest:
+            year_sql = "(SELECT y FROM latest_parts)"
+            params.pop("year", None)
+        else:
+            if year is None:
+                year = 0
+            params["year"] = int(year)
+            year_sql = "CAST(:year AS int)"
 
-        meta = {
-            "view": "public.v_import_monthly_hs",
-            "view_type": "hs",
-            "domain": domain,
-            "metric": metric,
-            "topn": topn
-        }
+        sql_body = f"""
+        SELECT
+          "senderReceiver" AS country,
+          {metric_expr} AS value
+        FROM {view}
+        WHERE year = {year_sql}
+          AND "senderReceiver" IS NOT NULL
+          {"AND sub3 ILIKE :sub3" if filters.get("sub3") else ""}
+        GROUP BY "senderReceiver"
+        ORDER BY value DESC
+        LIMIT :topn
+        """
 
-        return text(sql_query), params, meta
+        meta["granularity"] = "country"
+        return text(_with_prefix(sql_body) if is_latest else sql_body), params, meta
 
 
 

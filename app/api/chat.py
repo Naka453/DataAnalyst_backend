@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -21,6 +23,15 @@ from app.analytics.query_log import log_query
 
 
 router = APIRouter()
+
+
+def _build_log_event(request_id: str, session_id: str, question: str, started_at: float) -> Dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "session_id": session_id,
+        "question": question,
+        "latency_ms": round((time.perf_counter() - started_at) * 1000, 2),
+    }
 
 
 async def require_key(x_api_key: Optional[str] = Header(None)) -> None:
@@ -126,11 +137,11 @@ def _infer_domain_from_text(q: str) -> Optional[str]:
 
 def canonicalize_intent(intent: Dict[str, Any], state: Any, q: str) -> Dict[str, Any]:
     out = dict(intent or {})
+    qn = (q or "").strip().casefold()
 
-    # Импорт улсаар байх үгсийг олж `calc`-ийг тохируулна
-    if "импорт улсаар" in q:
-        out["calc"] = "timeseries_country"  # Улсаар тооцоолол хийх
-        out["filters"] = {"sub3": "суудлын автомашин"}  # Суудлын автомашины импорт
+    # Импорт + улсаар гэсэн хүсэлтэд country series ашиглана
+    if "импорт" in qn and "улсаар" in qn:
+        out["calc"] = "timeseries_country"
 
     # domain тодорхойлох хэсэг
     q_domain = _infer_domain_from_text(q)
@@ -151,6 +162,8 @@ def _infer_period(calc: str, time_field: Any) -> str:
         return "series_month"
     if calc in ("timeseries_year",):
         return "series_year"
+    if calc in ("timeseries_country",):
+        return "series_country"
     if calc in ("ytd", "year_total", "avg_years"):
         return "year"
     return "month"
@@ -217,8 +230,19 @@ def _normalize_value_result(
             )
         return {"series": series}, None
 
-    return {"value": r0.get("value")}, None
+    if calc == "timeseries_country":
+        series = []
+        for x in rows:
+            series.append(
+                {
+                    "country": str(x.get("country") or ""),
+                    "label": str(x.get("country") or ""),
+                    "value": x.get("value"),
+                }
+            )
+        return {"series": series}, None
 
+    return {"value": r0.get("value")}, None
 
 def sync_intent_from_state(intent: dict, state: Any) -> dict:
     """
@@ -241,57 +265,71 @@ async def chat(
     db: AsyncSession = Depends(get_db),
 ):
     q = (body.message or "").strip()
+    session_id = getattr(body, "session_id", None) or "default"
+    request_id = str(uuid.uuid4())
+    started_at = time.perf_counter()
+
     if not q:
-        return {"answer": "Асуултаа бичнэ үү.", "meta": {}, "result": None}
+        return {"answer": "Асуултаа бичнэ үү.", "meta": {"request_id": request_id}, "result": None}
 
     # 0) Smalltalk / General knowledge
     if not _looks_analytic(q):
         prompt = f"Та Монгол хэл дээр ярьдаг туслах. Найрсаг, товч хариул.\nАсуулт: {q}"
-        return {"answer": llm_text(prompt), "meta": {"intent": None}, "result": None}
+        return {"answer": llm_text(prompt), "meta": {"intent": None, "request_id": request_id}, "result": None}
 
-    session_id = getattr(body, "session_id", None) or "default"
+    try:
+        # ✅ 1) Conversation layer (state merge + clarify + suggestions)
+        convo = handle_chat(q, session_id)
+        if convo.get("mode") == "clarify":
+            meta = convo.get("meta") or {}
+            meta["request_id"] = request_id
+            return {
+                "answer": convo.get("answer"),
+                "meta": meta,
+                "result": None,
+            }
 
-    # ✅ 1) Conversation layer (state merge + clarify + suggestions)
-    convo = handle_chat(q, session_id)
+        state = convo.get("state")
+        overrides = convo.get("overrides") or {}
+        raw_intent = convo.get("intent") or {}  # debug only
 
-    if convo.get("mode") == "clarify":
-        return {
-            "answer": convo.get("answer"),
-            "meta": convo.get("meta"),
-            "result": None,
-        }
+        # ✅ SINGLE SOURCE OF TRUTH
+        intent = state.to_intent() if state else {}
+        intent = canonicalize_intent(intent, state, q)
 
-    state = convo.get("state")
-    overrides = convo.get("overrides") or {}
-    raw_intent = convo.get("intent") or {}  # debug only
+        # 1) SQL build + execute (✅ once)
+        sql, params, sql_meta = build_sql(intent, q)
+        r = await db.execute(sql, params)
+        rows = [dict(x) for x in r.mappings().all()][:500]
 
-    # ✅ SINGLE SOURCE OF TRUTH
-    intent = state.to_intent() if state else {}
-    intent = canonicalize_intent(intent, state, q)
+        # ✅ IMPORTANT: use sql_meta overrides
+        calc = sql_meta.get("calc") or intent.get("calc") or "month_value"
+        metric = sql_meta.get("metric") or intent.get("metric") or "amountUSD"
+        domain = sql_meta.get("domain") or intent.get("domain") or "export"
 
-    # 1) SQL build + execute (✅ once)
-    sql, params, sql_meta = build_sql(intent, q)
-    r = await db.execute(sql, params)
-    rows = [dict(x) for x in r.mappings().all()][:500]
+        # 3) Normalize
+        normalized, err_code = _normalize_value_result(calc, rows)
 
-    # ✅ IMPORTANT: use sql_meta overrides
-    calc = sql_meta.get("calc") or intent.get("calc") or "month_value"
-    metric = sql_meta.get("metric") or intent.get("metric") or "amountUSD"
-    domain = sql_meta.get("domain") or intent.get("domain") or "export"
+        # ✅ LOG HERE (rows + err_code бэлэн болсон яг энэ цэг)
+        log_query({
+            **_build_log_event(request_id, session_id, q, started_at),
+            "intent": intent,
+            "view": sql_meta.get("view"),
+            "view_type": sql_meta.get("view_type"),
+            "calc": sql_meta.get("calc"),
+            "row_count": len(rows),
+            "status": ("no_data" if err_code == "no_data" else "success"),
+        })
 
-    # 3) Normalize
-    normalized, err_code = _normalize_value_result(calc, rows)
-
-    # ✅ LOG HERE (rows + err_code бэлэн болсон яг энэ цэг)
-    log_query({
-        "question": q,
-        "intent": intent,
-        "view": sql_meta.get("view"),
-        "view_type": sql_meta.get("view_type"),
-        "calc": sql_meta.get("calc"),
-        "row_count": len(rows),
-        "status": ("no_data" if err_code == "no_data" else "success"),
-    })
+        # Further processing...
+    except Exception as exc:
+        log_query({
+            **_build_log_event(request_id, session_id, q, started_at),
+            "status": "error",
+            "error_class": type(exc).__name__,
+            "error_message": str(exc),
+        })
+        raise
 
     unit = _unit(metric)
     period = _infer_period(calc, intent.get("time"))
@@ -305,7 +343,7 @@ async def chat(
             if normalized.get("pct") is None
             else f"{float(normalized['pct']):.2f}%",
         }
-    elif calc in ("timeseries_month", "timeseries_year"):
+    elif calc in ("timeseries_month", "timeseries_year", "timeseries_country"):
         display = None
     else:
         display = _format_value(normalized.get("value"), metric)
@@ -348,6 +386,7 @@ async def chat(
                 "intent_raw": raw_intent,  # ✅ optional debug
                 "sql_meta": sql_meta,
                 "overrides": overrides,
+                "request_id": request_id,
             }
         )
 
@@ -405,6 +444,7 @@ async def chat(
     - metric: "{metric_label}" гэдгийг ашигла
     - Хэрвээ result.warning == "no_data" бол: "Өгөгдөл олдсонгүй" гэж нэг өгүүлбэр бичээд зогс.
     - timeseries (series) бол: "Хүснэгт/цуваа гаргалаа" + хамгийн эхний ба сүүлийн утгыг л дурд (байвал)
+    - timeseries (series) бол: "Хүснэгт/цуваа гаргалаа" + хамгийн өндөр ба хамгийн бага утгыг дурд (байвал)
     - single value бол: display-г нэг өгүүлбэрт тодорхой хэл
     - Шүүлтүүд байвал нэг мөрөөр {filters_summary} байдлаар дурд
     - Тоог таслалтай, 2 орны нарийвчлалтай бич (display байгаа бол display-г тэр чигт нь ашигла)
@@ -433,17 +473,21 @@ async def chat(
                 f"Одоогийн={display['current']}, Өмнөх={display['previous']}, "
                 f"Өөрчлөлт={display['pct']} ({trend})"
             )
-        elif calc in ("timeseries_month", "timeseries_year"):
+        elif calc in ("timeseries_month", "timeseries_year", "timeseries_country"):
             series = normalized.get("series") or []
+            sorted_series = [x for x in series if x.get("value_scaled") is not None]
             if series:
-                first = series[0]
-                last = series[-1]
-                # display байхгүй үед raw value дээр scale ашиглан format хийхгүй, богино үлдээнэ
-                explanation = (
+                if sorted_series:
+                    sorted_series = sorted(sorted_series, key=lambda x: x.get("value_scaled"))
+                    min_p = sorted_series[0]
+                    max_p = sorted_series[-1]
+                    explanation = (
                     f"{dom} • {met}{flt}: хүснэгт/цуваа гаргалаа. "
-                    f"Эхлэл {first.get('label')}: {first.get('value_scaled')}, "
-                    f"Сүүл {last.get('label')}: {last.get('value_scaled')}."
-                )
+                    f"Хамгийн их {max_p.get('label')}: {max_p.get('value_scaled')}, "
+                    f"хамгийн бага {min_p.get('label')}: {min_p.get('value_scaled')}."
+                    )
+                else:
+                    explanation = f"{dom} • {met}{flt}: хүснэгт/цуваа гаргалаа."
             else:
                 explanation = f"{dom} • {met}{flt}: хүснэгт/цуваа гаргалаа."
         else:

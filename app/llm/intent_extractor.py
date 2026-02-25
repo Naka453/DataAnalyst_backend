@@ -1,12 +1,36 @@
 from __future__ import annotations
 import re
+
 from typing import Any, Dict
+
+from jsonschema import ValidationError, validate
+
+from app.llm.client import llm_json
+from app.llm.intent_schema import INTENT_SCHEMA
+from app.llm.prompt import build_intent_prompt
 
 # category keywords (same keys as your fallback_intent.py)
 CATEGORY_KEYWORDS = ("тамхи", "суудлын автомашин", "хүнс", "автобензин", "түргэн эдэлгээтэй", "хэрэглээний бүтээгдэхүүн")
 
 def _norm(s: str) -> str:
     return (s or "").strip().casefold()
+
+
+def extract_intent(question: str) -> Dict[str, Any]:
+    prompt = build_intent_prompt(question)
+    payload = llm_json(prompt)
+
+    if not isinstance(payload, dict):
+        return {}
+
+    try:
+        validate(instance=payload, schema=INTENT_SCHEMA)
+    except ValidationError:
+        # Schema is strict for safety; caller will pass through sanitize + fallback as needed.
+        return payload
+
+    return payload
+
 
 def sanitize_intent(intent: Dict[str, Any], question: str) -> Dict[str, Any]:
     """

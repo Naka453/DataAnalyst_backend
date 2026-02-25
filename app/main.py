@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
+from app.core.config import settings
 
 
 # ✅ Truststore: optional (dev/VPN дээр хэрэгтэй байж болно), production дээр байхгүй байсан ч асна
@@ -32,3 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_router)
+
+@app.on_event("startup")
+async def validate_runtime_settings() -> None:
+    settings.validate()

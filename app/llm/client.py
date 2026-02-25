@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from google import genai
 from google.genai import types
@@ -40,9 +40,18 @@ def _is_quota_error(e: Exception) -> bool:
     return isinstance(e, genai_errors.ClientError) and getattr(e, "status_code", None) == 429
 
 
-# -------- Client (create once) --------
+# # -------- Client --------
 
-_client: genai.Client = genai.Client(api_key=settings.gemini_api_key)
+_client: Optional[genai.Client] = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        if not settings.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY missing in environment")
+        _client = genai.Client(api_key=settings.gemini_api_key)
+    return _client
 
 
 # -------- Public API --------
@@ -53,7 +62,7 @@ def llm_json(prompt: str) -> Dict[str, Any]:
     429 quota үед raise хийнэ (chat.py дээр fallback intent рүү шилжинэ)
     """
     try:
-        raw = _client.models.generate_content(
+        raw = _get_client().models.generate_content(
             model=settings.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -76,7 +85,7 @@ def llm_json(prompt: str) -> Dict[str, Any]:
                   "Markdown code fence (```), тайлбар өгүүлбэр, нэмэлт тэмдэгт бичихийг хориглоно."
             )
 
-            raw2 = _client.models.generate_content(
+            raw2 = _get_client().models.generate_content(
                 model=settings.gemini_model,
                 contents=retry_prompt,
                 config=types.GenerateContentConfig(
@@ -113,7 +122,7 @@ def llm_text(prompt: str) -> str:
     429 quota үед хоосон буцаана (chat.py base_answer руу fallback).
     """
     try:
-        resp = _client.models.generate_content(
+        resp = _get_client().models.generate_content(
             model=settings.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.4),
