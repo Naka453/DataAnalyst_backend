@@ -136,7 +136,12 @@ def _time_years(intent_time: Any) -> Optional[List[int]]:
         return years if years else None
     return None
 
-def _where_filters(filters: Dict[str, Any], params: Dict[str, Any], need_company: bool) -> str:
+def _where_filters(
+    filters: Dict[str, Any],
+    params: Dict[str, Any],
+    need_company: bool,
+    allow_category_filters: bool,
+) -> str:
     clauses = []
 
     # hscode: string эсвэл list
@@ -162,10 +167,11 @@ def _where_filters(filters: Dict[str, Any], params: Dict[str, Any], need_company
         params["customs"] = f"%{str(filters['customs']).strip()}%"
         clauses.append("customs ILIKE :customs")
 
-        # --- Category filters (for v_*_monthly_category) ---
-    if filters.get("purpose"):
-        params["purpose"] = f"%{str(filters['purpose']).strip()}%"
-        clauses.append("purpose ILIKE :purpose")
+        # --- Category filters (only when selected view supports these columns) ---
+        if allow_category_filters:
+            if filters.get("purpose"):
+                params["purpose"] = f"%{str(filters['purpose']).strip()}%"
+                clauses.append("purpose ILIKE :purpose")
 
     if filters.get("sub1"):
         params["sub1"] = f"%{str(filters['sub1']).strip()}%"
@@ -227,22 +233,24 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
         view_type = "hs"
 
     # -------------------------------------------------
-    # ✅ 1) Category fallback (always wins; never mix HS)
+    # ✅ 1) Domain-aware fallback
+    # import  -> CATEGORY_KEYWORDS
+    # export  -> HS_CODE_MAP
     # -------------------------------------------------
-    cat_filters = _infer_category_filters(question)
-    if cat_filters:
-        filters.update(cat_filters)
-        filters.pop("hscode", None)
+    if domain == "import":
+        cat_filters = _infer_category_filters(question)
+        if cat_filters:
+            filters.update(cat_filters)
+            filters.pop("hscode", None)
+    else:  # export
+        # export дээр category fallback хэрэглэхгүй, зөвхөн HS fallback хэрэглэнэ
+        for k in ("purpose", "sub1", "sub2", "sub3"):
+            filters.pop(k, None)
 
-    has_category = any(filters.get(k) for k in ("purpose", "sub1", "sub2", "sub3"))
-
-    # -------------------------------------------------
-    # ✅ 2) HS fallback (only if NOT category and NOT "нийт")
-    # -------------------------------------------------
-    if (not has_category) and (not filters.get("hscode")) and ("нийт" not in qn):
-        hs = _infer_hscode(question)
-        if hs:
-            filters["hscode"] = hs
+        if (not filters.get("hscode")) and ("нийт" not in qn):
+            hs = _infer_hscode(question)
+            if hs:
+                filters["hscode"] = hs
 
     # -------------------------------------------------
     # ✅ 3) Time parse + HARD RULE for multi-year
@@ -274,7 +282,8 @@ def build_sql(intent: Dict[str, Any], question: str) -> Tuple[Any, Dict[str, Any
     # -------------------------------------------------
     # ✅ 6) Params + where
     # -------------------------------------------------
-    w = _where_filters(filters, params, need_company)
+    allow_category_filters = (view_type == "category")
+    w = _where_filters(filters, params, need_company, allow_category_filters)
 
     # metric expr (aggregate level)
     if metric == "amountUSD":
@@ -544,7 +553,7 @@ ORDER BY year, month
         FROM {view}
         WHERE year = {year_sql}
           AND "senderReceiver" IS NOT NULL
-          {"AND sub3 ILIKE :sub3" if filters.get("sub3") else ""}
+          {"AND sub3 ILIKE :sub3" if (allow_category_filters and filters.get("sub3")) else ""}
         GROUP BY "senderReceiver"
         ORDER BY value DESC
         LIMIT :topn
