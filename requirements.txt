@@ -8,3 +8,4 @@ httpx
 google-genai
 jsonschema
 pytz
+python-multipart
