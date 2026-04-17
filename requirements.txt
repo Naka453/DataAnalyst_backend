@@ -9,3 +9,4 @@ google-genai
 jsonschema
 pytz
 python-multipart
+openai>=1.0.0
