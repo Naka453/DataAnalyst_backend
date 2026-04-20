@@ -20,6 +20,8 @@ from app.models.intent import ChatRequest
 # ✅ conversation pre-processor (state merge + clarify + suggestions)
 from app.services.chat_service import handle_chat
 from app.analytics.query_log import log_query
+from app.services.intent_router import detect_intent
+from app.api.knowledge import knowledge_chat
 
 
 router = APIRouter()
@@ -264,6 +266,11 @@ async def chat(
     dep: None = Depends(require_key),
     db: AsyncSession = Depends(get_db),
 ):
+    # 🧠 intent detection
+    intent = detect_intent(body.message)
+
+    if intent == "rag":
+        return await knowledge_chat(body)
     q = (body.message or "").strip()
     session_id = getattr(body, "session_id", None) or "default"
     request_id = str(uuid.uuid4())
