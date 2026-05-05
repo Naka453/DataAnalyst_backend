@@ -26,6 +26,9 @@ def merge_intent(
     if intent.metric:
         s.metric = intent.metric
 
+    if intent.calc:
+        s.calc = intent.calc
+
     # base time from intent
     if intent.time:
         # ✅ years эхэлж (multi-year) → year-г clear

@@ -181,8 +181,12 @@ def build_intent_fallback(
             time = {"year": y, "month": m}
         elif y:
             time = {"year": y}
-            # ✅ year-only: default to monthly series (more reliable expectation)
-            if calc == "month_value":
+            wants_total = any(k in q for k in ("нийт", "нийлбэр", "үнийн дүн", "нийт дүн"))
+            asking_value = any(k in q for k in ("хэд", "хэчнээн", "дүн", "value", "үнийн дүн"))
+            if calc == "month_value" and wants_total and asking_value:
+                calc = "year_total"
+            # ✅ year-only: default to monthly series unless the user asks for a total
+            elif calc == "month_value":
                 calc = "timeseries_month"
         else:
             time = "latest"

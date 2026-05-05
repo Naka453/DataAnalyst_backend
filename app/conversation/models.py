@@ -62,6 +62,7 @@ class Intent(BaseModel):
 class ConversationState(BaseModel):
     domain: Optional[Domain] = None
     metric: Optional[Metric] = None
+    calc: Optional[str] = None
     unit: Optional[str] = None
     awaiting_clarification: bool = False
     pending_question: Optional[str] = None
@@ -79,6 +80,7 @@ class ConversationState(BaseModel):
         intent: Dict[str, Any] = {
             "domain": self.domain,
             "metric": self.metric,
+            "calc": self.calc,
             "time": {},
             "filters": {},
         }

@@ -167,26 +167,26 @@ def _where_filters(
         params["customs"] = f"%{str(filters['customs']).strip()}%"
         clauses.append("customs ILIKE :customs")
 
-        # --- Category filters (only when selected view supports these columns) ---
-        if allow_category_filters:
-            if filters.get("purpose"):
-                params["purpose"] = f"%{str(filters['purpose']).strip()}%"
-                clauses.append("purpose ILIKE :purpose")
+    # Category filters only when selected view supports these columns.
+    if allow_category_filters:
+        if filters.get("purpose"):
+            params["purpose"] = f"%{str(filters['purpose']).strip()}%"
+            clauses.append("purpose ILIKE :purpose")
 
-    if filters.get("sub1"):
-        params["sub1"] = f"%{str(filters['sub1']).strip()}%"
-        clauses.append("sub1 ILIKE :sub1")
+        if filters.get("sub1"):
+            params["sub1"] = f"%{str(filters['sub1']).strip()}%"
+            clauses.append("sub1 ILIKE :sub1")
 
-    if filters.get("sub2"):
-        params["sub2"] = f"%{str(filters['sub2']).strip()}%"
-        clauses.append("sub2 ILIKE :sub2")
+        if filters.get("sub2"):
+            params["sub2"] = f"%{str(filters['sub2']).strip()}%"
+            clauses.append("sub2 ILIKE :sub2")
 
-    if filters.get("sub3"):
-        params["sub3"] = f"%{str(filters['sub3']).strip()}%"
-        clauses.append("sub3 ILIKE :sub3")
+        if filters.get("sub3"):
+            params["sub3"] = f"%{str(filters['sub3']).strip()}%"
+            clauses.append("sub3 ILIKE :sub3")
 
-        # Хэрэв компанийн нэр орсон бол WHERE нөхцөлд оруулах
-    if filters.get("company"):
+    # Хэрэв компанийн нэр орсон бол WHERE нөхцөлд оруулах
+    if need_company and filters.get("company"):
         params["company"] = f"%{filters['company']}%"  # Компаний нэрийг params-д оруулна
         clauses.append('"companyName" ILIKE :company')  # Шүүлтэрийг зөв бичиж оруулна
 
@@ -563,6 +563,36 @@ ORDER BY year, month
         return text(_with_prefix(sql_body) if is_latest else sql_body), params, meta
 
 
+    if calc == "ytd":
+        if is_latest:
+            base = w.replace("WHERE ", "")
+            extra = f" AND {base}" if base else ""
+            sql_body = f"""
+    SELECT
+      (SELECT y FROM latest_parts) AS year,
+      (SELECT m FROM latest_parts) AS month,
+      {metric_expr} AS value
+    FROM {view}
+    WHERE year = (SELECT y FROM latest_parts)
+      AND month <= (SELECT m FROM latest_parts){extra}
+    """
+            return text(_with_prefix(sql_body)), params, meta
+
+        if year is None:
+            year = 0
+        params["year"] = int(year)
+        params["mmax"] = int(month or 12)
+        base = w + (" AND year = :year AND month <= :mmax" if w else "WHERE year = :year AND month <= :mmax")
+        sql_body = f"""
+SELECT
+  CAST(:year AS int) AS year,
+  CAST(:mmax AS int) AS month,
+  {metric_expr} AS value
+FROM {view}
+{base}
+"""
+        return text(sql_body), params, meta
+
 
     if calc == "yoy":
         if is_latest:
@@ -641,13 +671,13 @@ SELECT
         return text(sql_body), params, meta
 
     if calc == "weighted_price":
-        where2 = _append_time_month(w)
         metric_expr2 = (
             "SUM(COALESCE(amountUSD,0)) "
             "/ NULLIF(SUM(COALESCE(quantity,0)) / 1000, 0)"
         )
 
         if is_latest:
+            where2 = _append_time_month(w)
             sql_body = f"""
 SELECT
   (SELECT y FROM latest_parts) AS year,
@@ -658,6 +688,20 @@ FROM {view}
 """
             return text(_with_prefix(sql_body)), params, meta
 
+        if year is not None and month is None:
+            params["year"] = int(year)
+            base = w + (" AND year = :year" if w else "WHERE year = :year")
+            sql_body = f"""
+SELECT
+  CAST(:year AS int) AS year,
+  NULL::int AS month,
+  {metric_expr2} AS value
+FROM {view}
+{base}
+"""
+            return text(sql_body), params, meta
+
+        where2 = _append_time_month(w)
         sql_body = f"""
 SELECT
   CAST(:year AS int) AS year,

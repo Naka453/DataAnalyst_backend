@@ -65,3 +65,31 @@ def test_build_sql_sets_country_calc_meta_for_import_country_query():
     assert meta["calc"] == "timeseries_country"
     assert meta["granularity"] == "country"
     assert params["year"] == 2025
+
+
+def test_sanitize_intent_corrects_total_export_amount_question():
+    raw = {
+        "domain": "import",
+        "calc": "timeseries_month",
+        "metric": "quantity",
+        "time": "latest",
+        "filters": {"hscode": "2026"},
+    }
+
+    out = intent_extractor.sanitize_intent(raw, "2026 оны нийт экспортын үнийн дүн хэд вэ")
+
+    assert out["domain"] == "export"
+    assert out["metric"] == "amountUSD"
+    assert out["calc"] == "year_total"
+    assert out["time"] == {"year": 2026}
+    assert "hscode" not in out["filters"]
+
+
+def test_fallback_intent_total_export_amount_question_is_year_total():
+    out = build_intent_fallback("2026 оны нийт экспортын үнийн дүн хэд вэ")
+
+    assert out["domain"] == "export"
+    assert out["metric"] == "amountUSD"
+    assert out["calc"] == "year_total"
+    assert out["time"] == {"year": 2026}
+    assert out["filters"] == {}
